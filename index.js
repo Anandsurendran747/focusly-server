@@ -23,7 +23,7 @@ app.use(cookieParser());
 const allowedOrigins = [process.env.CLIENT_URL || 'http://localhost:3000', 'http://localhost:3001'];
 app.use(cors({
   credentials: true,
-  origin: allowedOrigins
+  origin: "https://focusly-5lvc.onrender.com"
 }));
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
