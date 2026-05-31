@@ -26,8 +26,11 @@ router.post('/register', async (req, res) => {
 
 // Login a user
 router.post('/login', async (req, res) => {
+    console.log('Login request received');
     try {
         const { email, password } = req.body;
+        console.log('Email:', email);
+        console.log('Password:', password ? 'Provided' : 'Not provided');
         if (!email || !password) {
             return res.status(400).json({ message: 'Email and password are required' });
         }
