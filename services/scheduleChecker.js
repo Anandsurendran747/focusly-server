@@ -2,100 +2,153 @@ const cron = require("node-cron");
 const sendNotificationToUser = require("./notification.js");
 const Schedule = require("../models/Schedule.js");
 
-async function checkSchedules() {
-    const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000;
+const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000;
 
-    // Reset notifiedToday every midnight IST (18:30 UTC = 00:00 IST)
-    cron.schedule("30 18 * * *", async () => {
-        await Schedule.updateMany(
-            {},
-            { $set: { "milestones.$[].notifiedToday": false } }
+// ✅ Convert HH:MM IST string to UTC Date object for today
+function istTimeToUTC(hours, minutes) {
+    const now = new Date();
+    const nowIST = new Date(now.getTime() + IST_OFFSET_MS);
+
+    const milestoneIST = new Date(0);
+    milestoneIST.setUTCFullYear(nowIST.getUTCFullYear());
+    milestoneIST.setUTCMonth(nowIST.getUTCMonth());
+    milestoneIST.setUTCDate(nowIST.getUTCDate());
+    milestoneIST.setUTCHours(hours, minutes, 0, 0);
+
+    return new Date(milestoneIST.getTime() - IST_OFFSET_MS);
+}
+
+// ✅ Format time for notification message (12hr format)
+function formatTime(timeStr) {
+    const [h, m] = timeStr.split(":").map(Number);
+    const period = h >= 12 ? "PM" : "AM";
+    const hour = h % 12 || 12;
+    return `${hour}:${String(m).padStart(2, "0")} ${period}`;
+}
+
+// ✅ Build a rich notification message
+function buildNotificationMessage(milestone, diffMinutes) {
+    const timeFormatted = formatTime(milestone.timeFrom);
+    const endFormatted = milestone.timeTo ? formatTime(milestone.timeTo) : null;
+
+    if (diffMinutes <= 0) {
+        return {
+            title: `🔔 Starting Now: ${milestone.title}`,
+            body: endFormatted
+                ? `Your milestone has started! Running until ${endFormatted}.`
+                : `Your milestone is starting right now!`
+        };
+    }
+
+    return {
+        title: `⏰ Upcoming: ${milestone.title}`,
+        body: endFormatted
+            ? `Starts at ${timeFormatted} and runs until ${endFormatted}.`
+            : `Starting in ${Math.round(diffMinutes)} minute${diffMinutes > 1 ? "s" : ""} at ${timeFormatted}.`
+    };
+}
+
+// ✅ Validate time string
+function isValidTime(hours, minutes) {
+    return (
+        !Number.isNaN(hours) &&
+        !Number.isNaN(minutes) &&
+        hours >= 0 && hours <= 23 &&
+        minutes >= 0 && minutes <= 59
+    );
+}
+
+async function processMilestone(schedule, milestone, now) {
+    const [hours, minutes] = milestone.timeFrom.split(":").map(Number);
+
+    if (!isValidTime(hours, minutes)) return null;
+
+    const milestoneUTC = istTimeToUTC(hours, minutes);
+    const diffMinutes = (milestoneUTC - now) / (60 * 1000);
+
+    console.log(
+        `📍 [${milestone.title}]`,
+        "| IST:", milestone.timeFrom,
+        "| UTC:", milestoneUTC.toISOString(),
+        "| Diff:", Math.round(diffMinutes), "mins"
+    );
+
+    if (diffMinutes >= 0 && diffMinutes <= 1.5) {
+        if (milestone.notifiedToday) {
+            console.log(`⏭️  Skipping "${milestone.title}" — already notified today`);
+            return null;
+        }
+
+        const { title, body } = buildNotificationMessage(milestone, diffMinutes);
+
+        await sendNotificationToUser(schedule.user, title, body);
+
+        await Schedule.updateOne(
+            { _id: schedule._id, "milestones._id": milestone._id },
+            { $set: { "milestones.$.notifiedToday": true } }
         );
-        console.log("Reset all notifiedToday flags");
+
+        console.log(`✅ Notified: "${milestone.title}"`);
+
+        return {
+            scheduleId: schedule._id,
+            milestone,
+            startsInMinutes: Math.round(diffMinutes),
+        };
+    }
+
+    return null;
+}
+
+async function checkSchedules() {
+    // ✅ Reset notifiedToday every midnight IST (18:30 UTC)
+    cron.schedule("30 18 * * *", async () => {
+        try {
+            await Schedule.updateMany(
+                {},
+                { $set: { "milestones.$[].notifiedToday": false } }
+            );
+            console.log("🔄 Reset all notifiedToday flags");
+        } catch (err) {
+            console.error("❌ Failed to reset notifiedToday flags:", err.message);
+        }
     });
 
-    // Run every minute
+    // ✅ Run every minute
     cron.schedule("*/1 * * * *", async () => {
-        console.log("Checking database...");
-
         const now = new Date();
-        const schedules = await Schedule.find({
-            fromDate: { $lte: now },
-            toDate: { $gte: now },
-        });
+        console.log(`\n⏱️  Cron tick: ${now.toISOString()}`);
 
-        console.log(`Found ${schedules.length} active schedules to check.`);
+        try {
+            const schedules = await Schedule.find({
+                fromDate: { $lte: now },
+                toDate: { $gte: now },
+            });
 
-        const upcomingMilestones = [];
+            console.log(`📅 Active schedules: ${schedules.length}`);
 
-        for (const schedule of schedules) {
-            for (const milestone of schedule.milestones || []) {
-                if (!milestone.timeFrom) continue;
+            if (schedules.length === 0) return;
 
-                const [hours, minutes] = milestone.timeFrom.split(":").map(Number);
+            // ✅ Process all milestones in parallel
+            const results = await Promise.all(
+                schedules.flatMap(schedule =>
+                    (schedule.milestones || []).map(milestone =>
+                        processMilestone(schedule, milestone, now)
+                    )
+                )
+            );
 
-                if (
-                    Number.isNaN(hours) ||
-                    Number.isNaN(minutes) ||
-                    hours < 0 ||
-                    hours > 23 ||
-                    minutes < 0 ||
-                    minutes > 59
-                ) {
-                    continue;
-                }
+            const fired = results.filter(Boolean);
 
-                const nowIST = new Date(now.getTime() + IST_OFFSET_MS);
-
-                const milestoneStart = new Date(0);
-                milestoneStart.setUTCFullYear(nowIST.getUTCFullYear());
-                milestoneStart.setUTCMonth(nowIST.getUTCMonth());
-                milestoneStart.setUTCDate(nowIST.getUTCDate());
-                milestoneStart.setUTCHours(hours, minutes, 0, 0);
-
-                const milestoneUTC = new Date(milestoneStart.getTime() - IST_OFFSET_MS);
-                const diffMinutes = (milestoneUTC - now) / (60 * 1000);
-
-                console.log(
-                    "Now (UTC):", now.toISOString(),
-                    "| Milestone (IST):", milestone.timeFrom,
-                    "| Milestone (UTC):", milestoneUTC.toISOString(),
-                    "| Diff (mins):", Math.round(diffMinutes)
-                );
-
-                if (diffMinutes >= 0 && diffMinutes <= 1.5) {
-                    if (milestone.notifiedToday) {
-                        console.log(`Milestone "${milestone.title}" already notified today, skipping.`);
-                        continue;
-                    }
-
-                    upcomingMilestones.push({
-                        scheduleId: schedule._id,
-                        milestone,
-                        startsInMinutes: Math.round(diffMinutes),
-                    });
-
-                    console.log(`Milestone "${milestone.title}" is starting now!`);
-
-                    await sendNotificationToUser(
-                        schedule.user,
-                        "Milestone Reminder",
-                        `Your milestone "${milestone.title}" is starting now!`
-                    );
-
-                    await Schedule.updateOne(
-                        { _id: schedule._id, "milestones._id": milestone._id },
-                        { $set: { "milestones.$.notifiedToday": true } }
-                    );
-                }
+            if (fired.length > 0) {
+                console.log(`🔔 Notifications sent: ${fired.length}`);
+            } else {
+                console.log("💤 No milestones due right now");
             }
-        }
 
-        if (upcomingMilestones.length > 0) {
-            console.log("Upcoming milestones:", upcomingMilestones);
+        } catch (err) {
+            console.error("❌ Cron error:", err.message);
         }
-
-        return upcomingMilestones;
     });
 }
 

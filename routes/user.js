@@ -46,7 +46,7 @@ router.post('/login', async (req, res) => {
         const token = jwt.sign(
             { id: user._id, role: "user" },
             process.env.JWT_SECRET,
-            { expiresIn: "15m" }
+            { expiresIn: "24h" }
         );
         const isProduction = process.env.NODE_ENV === 'production';
         res.cookie("token", token, {
