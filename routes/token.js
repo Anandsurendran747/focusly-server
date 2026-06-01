@@ -3,14 +3,14 @@ const FcmToken = require("../models/Token");
 const admin = require("../firebase");
 const auth = require("../middlewares/auth");
 
-router.post("/save-token",auth, async (req, res) => {
+router.post("/save-token", auth, async (req, res) => {
     console.log("Saving token for user:", req.user.id);
     const { token } = req.body;
 
     await FcmToken.findOneAndUpdate(
         { userId: req.user.id },
         { token },
-        { upsert: true, new: true }
+        { upsert: true, returnDocument: 'after' }
     );
 
     res.json({
