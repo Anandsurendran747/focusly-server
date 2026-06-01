@@ -10,7 +10,8 @@ const scheduleRoutes = require('./routes/schedule');
 const fcmTokenRoutes = require('./routes/token');
 const rateLimit = require("express-rate-limit");
 const cookieParser = require("cookie-parser");
-const { default: checkSchedules } = require('./services/scheduleChecker');
+require("./firebase.js");
+const checkSchedules = require('./services/scheduleChecker');
 
 dotenv.config();
 

@@ -1,12 +1,11 @@
-import cron from "node-cron";
-import mongoose from "mongoose";
-import sendNotificationToUser from "./notification.js";
-import Schedule from "../models/Schedule.js";
+const cron = require("node-cron");
+const sendNotificationToUser = require("./notification.js");
+const Schedule = require("../models/Schedule.js");
 
-export default async function checkSchedules() {
+async function checkSchedules() {
     const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000;
 
-    // Reset notifiedToday every midnight IST
+    // Reset notifiedToday every midnight IST (18:30 UTC = 00:00 IST)
     cron.schedule("30 18 * * *", async () => {
         await Schedule.updateMany(
             {},
@@ -20,7 +19,6 @@ export default async function checkSchedules() {
         console.log("Checking database...");
 
         const now = new Date();
-
         const schedules = await Schedule.find({
             fromDate: { $lte: now },
             toDate: { $gte: now },
@@ -47,11 +45,15 @@ export default async function checkSchedules() {
                     continue;
                 }
 
-                // ✅ Convert IST milestone time to UTC for comparison
-                const milestoneStart = new Date(now);
-                milestoneStart.setUTCHours(hours, minutes, 0, 0);
-                const milestoneUTC = new Date(milestoneStart.getTime() - IST_OFFSET_MS);
+                const nowIST = new Date(now.getTime() + IST_OFFSET_MS);
 
+                const milestoneStart = new Date(0);
+                milestoneStart.setUTCFullYear(nowIST.getUTCFullYear());
+                milestoneStart.setUTCMonth(nowIST.getUTCMonth());
+                milestoneStart.setUTCDate(nowIST.getUTCDate());
+                milestoneStart.setUTCHours(hours, minutes, 0, 0);
+
+                const milestoneUTC = new Date(milestoneStart.getTime() - IST_OFFSET_MS);
                 const diffMinutes = (milestoneUTC - now) / (60 * 1000);
 
                 console.log(
@@ -61,9 +63,7 @@ export default async function checkSchedules() {
                     "| Diff (mins):", Math.round(diffMinutes)
                 );
 
-                // ✅ Only notify once, within 1 minute window
-                if (diffMinutes >= 0 && diffMinutes < 1) {
-                    // ✅ Skip if already notified today
+                if (diffMinutes >= 0 && diffMinutes <= 1.5) {
                     if (milestone.notifiedToday) {
                         console.log(`Milestone "${milestone.title}" already notified today, skipping.`);
                         continue;
@@ -83,7 +83,6 @@ export default async function checkSchedules() {
                         `Your milestone "${milestone.title}" is starting now!`
                     );
 
-                    // ✅ Mark as notified to prevent duplicates
                     await Schedule.updateOne(
                         { _id: schedule._id, "milestones._id": milestone._id },
                         { $set: { "milestones.$.notifiedToday": true } }
@@ -99,3 +98,5 @@ export default async function checkSchedules() {
         return upcomingMilestones;
     });
 }
+
+module.exports = checkSchedules;
