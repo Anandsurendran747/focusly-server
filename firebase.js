@@ -3,7 +3,7 @@ const dotenv = require("dotenv");
 
 dotenv.config();
 
-const privateKey = process.env.FIREBASE_PRIVATE_KEY.replace(/\\n/g, '\n');
+const privateKey = process.env.FIREBASE_PRIVATE_KEY.replace(/\\n/g, '\n').replace(/"/g, '') ;
 
 admin.initializeApp({
     credential: admin.credential.cert({
