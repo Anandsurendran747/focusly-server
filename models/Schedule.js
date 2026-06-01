@@ -40,6 +40,7 @@ const scheduleSchema = new mongoose.Schema(
                     trim: true,
                     maxlength: [5, 'Time must be in HH:MM format'],
                 },
+                notifiedToday: { type: Boolean, default: false }
             }
         ],
         priority: {
