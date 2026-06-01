@@ -4,6 +4,9 @@ const Schedule = require("../models/Schedule.js");
 
 const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000;
 
+// ✅ In-memory lock to prevent duplicate notifications
+const notifiedThisSession = new Set();
+
 // ✅ Convert HH:MM IST string to UTC Date object for today
 function istTimeToUTC(hours, minutes) {
     const now = new Date();
@@ -74,10 +77,27 @@ async function processMilestone(schedule, milestone, now) {
     );
 
     if (diffMinutes >= 0 && diffMinutes <= 1.5) {
-        if (milestone.notifiedToday) {
-            console.log(`⏭️  Skipping "${milestone.title}" — already notified today`);
+
+        // ✅ Unique key per milestone per day
+        const todayIST = new Date(now.getTime() + IST_OFFSET_MS)
+            .toISOString().slice(0, 10);
+        const lockKey = `${schedule._id}-${milestone._id}-${todayIST}`;
+
+        // ✅ Check in-memory lock FIRST (instant, no DB delay)
+        if (notifiedThisSession.has(lockKey)) {
+            console.log(`⏭️  Skipping "${milestone.title}" — in-memory lock`);
             return null;
         }
+
+        // ✅ Check DB flag as backup
+        if (milestone.notifiedToday) {
+            console.log(`⏭️  Skipping "${milestone.title}" — already notified today`);
+            notifiedThisSession.add(lockKey);
+            return null;
+        }
+
+        // ✅ Lock immediately before async operations
+        notifiedThisSession.add(lockKey);
 
         const { title, body } = buildNotificationMessage(milestone, diffMinutes);
 
@@ -101,9 +121,11 @@ async function processMilestone(schedule, milestone, now) {
 }
 
 async function checkSchedules() {
+
     // ✅ Reset notifiedToday every midnight IST (18:30 UTC)
     cron.schedule("30 18 * * *", async () => {
         try {
+            notifiedThisSession.clear();
             await Schedule.updateMany(
                 {},
                 { $set: { "milestones.$[].notifiedToday": false } }
