@@ -142,9 +142,12 @@ async function checkSchedules() {
         console.log(`\n⏱️  Cron tick: ${now.toISOString()}`);
 
         try {
+            const startOfToday = new Date(now);
+            startOfToday.setUTCHours(0, 0, 0, 0);
+
             const schedules = await Schedule.find({
                 fromDate: { $lte: now },
-                toDate: { $gte: now },
+                toDate: { $gte: startOfToday },  // ✅ compare against start of day, not current time
             });
 
             console.log(`📅 Active schedules: ${schedules.length}`);
