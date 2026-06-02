@@ -3,9 +3,13 @@ const sendNotificationToUser = require("./notification.js");
 const Schedule = require("../models/Schedule.js");
 
 const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000;
+const NOTIFY_WINDOW_MINUTES = 1.5;
 
 // ✅ In-memory lock to prevent duplicate notifications
 const notifiedThisSession = new Set();
+
+// ✅ Guard to ensure cron jobs are only registered once
+let cronInitialized = false;
 
 // ✅ Convert HH:MM IST string to UTC Date object for today
 function istTimeToUTC(hours, minutes) {
@@ -76,9 +80,8 @@ async function processMilestone(schedule, milestone, now) {
         "| Diff:", Math.round(diffMinutes), "mins"
     );
 
-    if (diffMinutes >= 0 && diffMinutes <= 1.5) {
+    if (diffMinutes >= 0 && diffMinutes <= NOTIFY_WINDOW_MINUTES) {
 
-        // ✅ Unique key per milestone per day
         const todayIST = new Date(now.getTime() + IST_OFFSET_MS)
             .toISOString().slice(0, 10);
         const lockKey = `${schedule._id}-${milestone._id}-${todayIST}`;
@@ -91,22 +94,34 @@ async function processMilestone(schedule, milestone, now) {
 
         // ✅ Check DB flag as backup
         if (milestone.notifiedToday) {
-            console.log(`⏭️  Skipping "${milestone.title}" — already notified today`);
+            console.log(`⏭️  Skipping "${milestone.title}" — already notified today (DB)`);
+            notifiedThisSession.add(lockKey); // sync in-memory with DB
+            return null;
+        }
+
+        // ✅ Atomic DB update — only proceeds if notifiedToday is still false
+        const updated = await Schedule.findOneAndUpdate(
+            {
+                _id: schedule._id,
+                "milestones._id": milestone._id,
+                "milestones.notifiedToday": false  // ✅ atomic guard
+            },
+            { $set: { "milestones.$.notifiedToday": true } },
+            { new: false } // we just need to know if update matched
+        );
+
+        // ✅ If no document matched, another process already notified
+        if (!updated) {
+            console.log(`⏭️  Skipping "${milestone.title}" — atomic DB lock failed`);
             notifiedThisSession.add(lockKey);
             return null;
         }
 
-        // ✅ Lock immediately before async operations
+        // ✅ Lock in-memory after confirmed DB update
         notifiedThisSession.add(lockKey);
 
         const { title, body } = buildNotificationMessage(milestone, diffMinutes);
-
         await sendNotificationToUser(schedule.user, title, body);
-
-        await Schedule.updateOne(
-            { _id: schedule._id, "milestones._id": milestone._id },
-            { $set: { "milestones.$.notifiedToday": true } }
-        );
 
         console.log(`✅ Notified: "${milestone.title}"`);
 
@@ -120,61 +135,70 @@ async function processMilestone(schedule, milestone, now) {
     return null;
 }
 
-async function checkSchedules() {
+async function resetNotifications() {
+    try {
+        notifiedThisSession.clear();
+        await Schedule.updateMany(
+            {},
+            { $set: { "milestones.$[].notifiedToday": false } }
+        );
+        console.log("🔄 Reset all notifiedToday flags");
+    } catch (err) {
+        console.error("❌ Failed to reset notifiedToday flags:", err.message);
+    }
+}
+
+async function runCheckCycle() {
+    const now = new Date();
+    console.log(`\n⏱️  Cron tick: ${now.toISOString()}`);
+
+    try {
+        const startOfToday = new Date(now);
+        startOfToday.setUTCHours(0, 0, 0, 0);
+
+        const schedules = await Schedule.find({
+            fromDate: { $lte: now },
+            toDate: { $gte: startOfToday }, // ✅ fix for same-day schedules
+        });
+
+        console.log(`📅 Active schedules: ${schedules.length}`);
+        if (schedules.length === 0) return;
+
+        // ✅ Process milestones sequentially to avoid race conditions
+        const fired = [];
+        for (const schedule of schedules) {
+            for (const milestone of schedule.milestones || []) {
+                const result = await processMilestone(schedule, milestone, now);
+                if (result) fired.push(result);
+            }
+        }
+
+        if (fired.length > 0) {
+            console.log(`🔔 Notifications sent: ${fired.length}`);
+        } else {
+            console.log("💤 No milestones due right now");
+        }
+
+    } catch (err) {
+        console.error("❌ Cron error:", err.message);
+    }
+}
+
+function checkSchedules() {
+    // ✅ Prevent multiple cron registrations if called more than once
+    if (cronInitialized) {
+        console.warn("⚠️  checkSchedules() already initialized — skipping");
+        return;
+    }
+    cronInitialized = true;
 
     // ✅ Reset notifiedToday every midnight IST (18:30 UTC)
-    cron.schedule("30 18 * * *", async () => {
-        try {
-            notifiedThisSession.clear();
-            await Schedule.updateMany(
-                {},
-                { $set: { "milestones.$[].notifiedToday": false } }
-            );
-            console.log("🔄 Reset all notifiedToday flags");
-        } catch (err) {
-            console.error("❌ Failed to reset notifiedToday flags:", err.message);
-        }
-    });
+    cron.schedule("30 18 * * *", resetNotifications);
 
-    // ✅ Run every minute
-    cron.schedule("*/1 * * * *", async () => {
-        const now = new Date();
-        console.log(`\n⏱️  Cron tick: ${now.toISOString()}`);
+    // ✅ Run check every minute
+    cron.schedule("*/1 * * * *", runCheckCycle);
 
-        try {
-            const startOfToday = new Date(now);
-            startOfToday.setUTCHours(0, 0, 0, 0);
-
-            const schedules = await Schedule.find({
-                fromDate: { $lte: now },
-                toDate: { $gte: startOfToday },  // ✅ compare against start of day, not current time
-            });
-
-            console.log(`📅 Active schedules: ${schedules.length}`);
-
-            if (schedules.length === 0) return;
-
-            // ✅ Process all milestones in parallel
-            const results = await Promise.all(
-                schedules.flatMap(schedule =>
-                    (schedule.milestones || []).map(milestone =>
-                        processMilestone(schedule, milestone, now)
-                    )
-                )
-            );
-
-            const fired = results.filter(Boolean);
-
-            if (fired.length > 0) {
-                console.log(`🔔 Notifications sent: ${fired.length}`);
-            } else {
-                console.log("💤 No milestones due right now");
-            }
-
-        } catch (err) {
-            console.error("❌ Cron error:", err.message);
-        }
-    });
+    console.log("✅ Cron jobs registered");
 }
 
 module.exports = checkSchedules;
